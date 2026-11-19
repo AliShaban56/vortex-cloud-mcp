@@ -59,19 +59,74 @@ function normalizeTools(tools) {
     inputSchema: jsonSchemaOrEmpty(tool.inputSchema)
   }));
 }
+function safeDatabaseDiagnostic(error) {
+  // Never return raw error messages, connection strings, hostnames, usernames, or credentials.
+  const code = typeof error?.code === "string" ? error.code : "";
+  const message = typeof error?.message === "string" ? error.message.toLowerCase() : "";
+
+  const knownCodes = new Set([
+    "28P01", "3D000", "28000", "42501", "53300", "57P03",
+    "08001", "08006", "ECONNREFUSED", "ETIMEDOUT", "ENOTFOUND",
+    "EAI_AGAIN", "EHOSTUNREACH", "ECONNRESET",
+    "SELF_SIGNED_CERT_IN_CHAIN", "UNABLE_TO_VERIFY_LEAF_SIGNATURE",
+    "ERR_TLS_CERT_ALTNAME_INVALID"
+  ]);
+
+  if (code === "28P01" || code === "28000" || message.includes("password authentication failed")) {
+    return { category: "AUTHENTICATION_FAILED", code: knownCodes.has(code) ? code : null };
+  }
+  if (message.includes("client password must be a string") || message.includes("password must be a string")) {
+    return { category: "DATABASE_PASSWORD_MISSING", code: null };
+  }
+  if (message.includes("tenant or user not found") || message.includes("invalid user")) {
+    return { category: "POOLER_USERNAME_INVALID", code: knownCodes.has(code) ? code : null };
+  }
+  if (code === "3D000") return { category: "DATABASE_NAME_INVALID", code };
+  if (code === "53300" || message.includes("too many clients") || message.includes("too many connections")) {
+    return { category: "CONNECTION_LIMIT_REACHED", code: knownCodes.has(code) ? code : null };
+  }
+  if (code === "42501") return { category: "DATABASE_PERMISSION_DENIED", code };
+  if (code === "ECONNREFUSED" || code === "ENOTFOUND" || code === "EAI_AGAIN" ||
+      code === "EHOSTUNREACH" || message.includes("getaddrinfo")) {
+    return { category: "HOST_OR_NETWORK_UNREACHABLE", code: knownCodes.has(code) ? code : null };
+  }
+  if (code === "ETIMEDOUT" || message.includes("timeout") || message.includes("timed out")) {
+    return { category: "CONNECTION_TIMEOUT", code: knownCodes.has(code) ? code : null };
+  }
+  if (code.startsWith("ERR_TLS") || code.startsWith("ERR_SSL") ||
+      code === "SELF_SIGNED_CERT_IN_CHAIN" || code === "UNABLE_TO_VERIFY_LEAF_SIGNATURE") {
+    return { category: "TLS_HANDSHAKE_FAILED", code: knownCodes.has(code) ? code : null };
+  }
+  if (code === "08001" || code === "08006" || code === "ECONNRESET") {
+    return { category: "CONNECTION_FAILED", code: knownCodes.has(code) ? code : null };
+  }
+  if (code === "57P03") return { category: "DATABASE_TEMPORARILY_UNAVAILABLE", code };
+  return { category: "UNKNOWN_DATABASE_ERROR", code: knownCodes.has(code) ? code : null };
+}
+
 async function health(res) {
   if (!process.env.DATABASE_URL) {
     return send(res, 503, {
       ok: false, service: "Vortex Cloud MCP", database: "not_configured",
-      message: "Add DATABASE_URL to the Vercel project environment."
+      diagnostic: { stage: "configuration", category: "DATABASE_URL_MISSING" }
     });
   }
+
+  let stage = "connection";
   try {
-    await ensureSchema();
+    // Run a lightweight query first, so connectivity errors can be distinguished from schema errors.
     await queryOne("SELECT 1 AS ok");
+    stage = "schema";
+    await ensureSchema();
     return send(res, 200, { ok: true, service: "Vortex Cloud MCP", database: "connected" });
-  } catch {
-    return send(res, 503, { ok: false, service: "Vortex Cloud MCP", database: "unavailable" });
+  } catch (error) {
+    const diagnostic = safeDatabaseDiagnostic(error);
+    return send(res, 503, {
+      ok: false,
+      service: "Vortex Cloud MCP",
+      database: "unavailable",
+      diagnostic: { stage, ...diagnostic }
+    });
   }
 }
 async function registerInstance(req, res) {
