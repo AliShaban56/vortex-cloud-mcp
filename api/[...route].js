@@ -22,7 +22,7 @@ function fail(res, status, code, message) {
 }
 function routePath(req) {
   const raw = new URL(req.url, "https://vortex.invalid").pathname;
-  return raw.replace(/^\\/api\\/?/, "").split("/").filter(Boolean);
+  return raw.replace(/^\/api\/?/, "").split("/").filter(Boolean);
 }
 function readBody(req) {
   if (Number(req.headers["content-length"] || 0) > 256 * 1024) {
