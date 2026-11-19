@@ -78,7 +78,11 @@ function safeDatabaseDiagnostic(error) {
   if (message.includes("client password must be a string") || message.includes("password must be a string")) {
     return { category: "DATABASE_PASSWORD_MISSING", code: null };
   }
-  if (message.includes("tenant or user not found") || message.includes("invalid user")) {
+  if ((message.includes("tenant/user") || message.includes("tenant or user")) &&
+      message.includes("not found")) {
+    return { category: "POOLER_TENANT_OR_USERNAME_NOT_FOUND", code: knownCodes.has(code) ? code : null };
+  }
+  if (message.includes("invalid user")) {
     return { category: "POOLER_USERNAME_INVALID", code: knownCodes.has(code) ? code : null };
   }
   if (code === "3D000") return { category: "DATABASE_NAME_INVALID", code };
