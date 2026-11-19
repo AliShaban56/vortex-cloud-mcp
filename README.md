@@ -1,2 +1,51 @@
-# vortex-cloud-mcp
-vortex-cloud-mcp
+# Vortex Cloud MCP
+
+Central HTTPS relay for VortexEditPro desktop instances. ChatGPT connects to a per-instance MCP URL; commands are queued in a durable database and executed by the user's own running desktop application. The Vercel service never receives project media or runs editing commands itself.
+
+## Architecture
+
+- Vercel Node.js Function: public HTTPS API and stateless MCP Streamable HTTP JSON-RPC endpoint.
+- Turso/libSQL: durable instance registry, hashed credentials, tool catalog, command queue, and rate-limit counters.
+- VortexEditPro desktop: outbound HTTPS heartbeat/poll/result requests; no inbound port forwarding or tunnel-client required.
+- Per-instance credentials: separate device token and MCP bearer token. Raw tokens are returned only once at registration.
+
+## Routes
+
+- `GET /api/health` — service/database readiness.
+- `POST /api/admin/instances` — create an instance (admin bearer required).
+- `POST /api/agent/:instanceId/heartbeat` — device presence and tool catalog.
+- `POST /api/agent/:instanceId/poll` — claim queued commands.
+- `POST /api/agent/:instanceId/result` — return command result.
+- `POST /api/mcp/:instanceId` — MCP JSON-RPC endpoint (MCP bearer required).
+
+The MCP endpoint supports `initialize`, `notifications/initialized`, `ping`, `tools/list`, and `tools/call`. It is stateless at the HTTP transport layer and uses database-backed command rendezvous.
+
+## Provisioning
+
+1. Connect a Turso database to the Vercel project and ensure it injects `TURSO_DATABASE_URL` and `TURSO_AUTH_TOKEN`.
+2. Add `VORTEX_ADMIN_SECRET` as an encrypted Vercel environment variable. Use a unique random secret; never commit it.
+3. Deploy the project and verify `GET /api/health` reports `database: connected`.
+4. Create a desktop instance:
+
+```bash
+curl -X POST "https://YOUR_HOST/api/admin/instances" \
+  -H "Authorization: Bearer YOUR_ADMIN_SECRET" \
+  -H "Content-Type: application/json" \
+  -d '{"name":"VortexEditPro on my PC"}'
+```
+
+5. Save the returned `device_token`, `mcp_token`, `instance_id`, and `mcp_url` securely. Tokens are displayed once.
+6. Configure the desktop app with the HTTPS base URL, instance ID, and device token. Add the MCP URL to ChatGPT with the MCP token as a bearer credential.
+
+## Security notes
+
+- Never commit admin, device, or MCP tokens.
+- Only tools advertised by the connected desktop are callable.
+- Device tokens and MCP tokens are stored as SHA-256 hashes.
+- Tool calls are bounded by a short serverless wait window; the desktop must poll continuously.
+- Request payloads and command results are size-limited.
+- All editing operations remain local to the user's desktop.
+
+## Current limitations
+
+This is the cloud relay foundation. The matching VortexEditPro desktop agent still needs to be implemented and integrated with the existing command/tool registry. Long-running exports should use a job-start/status pattern rather than hold an MCP request open.
