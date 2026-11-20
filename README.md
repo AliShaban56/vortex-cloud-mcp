@@ -61,7 +61,7 @@ Central HTTPS relay for VortexEditPro desktop instances. ChatGPT connects to a p
 
 
 ## OAuth support
-- `/.well-known/oauth-protected-resource/api/mcp/:instanceId` — per-instance RFC 9728 resource metadata.
+- `/api/oauth/protected-resource?resource=<encoded MCP URL>` — per-instance RFC 9728 resource metadata, advertised in the MCP 401 `WWW-Authenticate` challenge.
 - `/.well-known/oauth-authorization-server` — RFC 8414 authorization server metadata.
 - `POST /api/oauth/register` — public-client registration (no client secret).
 - `GET|POST /api/oauth/authorize` — user approval using the existing instance MCP token.
