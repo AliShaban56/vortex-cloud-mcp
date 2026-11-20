@@ -3,45 +3,57 @@
 Central HTTPS relay for VortexEditPro desktop instances. ChatGPT connects to a per-instance MCP URL; commands are queued in Turso libSQL and executed by the user's own running desktop application. The Vercel service never receives project media or runs editing commands itself.
 
 ## Architecture
-- Vercel Node.js Function: public HTTPS API and stateless MCP Streamable HTTP JSON-RPC endpoint.
-- Turso libSQL: durable instance registry, hashed credentials, tool catalog, command queue, and rate-limit counters.
-- VortexEditPro desktop: outbound HTTPS heartbeat/poll/result requests; no inbound port forwarding or tunnel-client required.
-- Per-instance credentials: separate device token and MCP bearer token. Raw tokens are returned only once at registration.
+- **Vercel (Node.js function):** public HTTPS API and stateless MCP Streamable HTTP JSON-RPC endpoint.
+- **Turso libSQL:** durable instance registry, enrollment tokens, hashed credentials, tool catalog, command queue, and rate-limit counters.
+- **VortexEditPro desktop (Vortex Cloud Agent):** outbound HTTPS registration (via enrollment token), heartbeat/poll/result; no inbound port forwarding or tunnel-client required.
+- **Per-instance credentials:** separate `device_token` (desktop agent) and `mcp_token` (ChatGPT/MCP client). Raw tokens are returned only once (at registration/rotation).
 
 ## Routes
-- `GET /` — basic service information (no database dependency).
-- `GET /api/health` — liveness; returns HTTP 200 while the API is running and reports database state separately.
-- `GET /api/ready` — readiness; returns HTTP 200 only when Turso libSQL and the required schema are available, otherwise HTTP 503.
-- `POST /api/admin/instances` — create an instance (admin bearer required).
-- `POST /api/agent/:instanceId/heartbeat` — device presence and tool catalog.
-- `POST /api/agent/:instanceId/poll` — claim queued commands.
-- `POST /api/agent/:instanceId/result` — return command result.
-- `POST /api/mcp/:instanceId` — MCP JSON-RPC endpoint (MCP bearer required).
+- `GET /` — service information.
+- `GET /api/health` — liveness (API running; reports database state separately).
+- `GET /api/ready` — readiness (200 only when Turso schema is available).
+- `POST /api/admin/instances` — create an instance directly (admin bearer `VORTEX_ADMIN_SECRET`).
+- `POST /api/admin/enrollments` — create a one-time enrollment token (admin bearer). **Use this so the desktop app never needs the admin secret.**
+- `POST /api/agent/register` — register a desktop instance using `enrollment_token` (no admin secret).
+- `GET /api/agent/:instanceId/info` — instance info (device bearer).
+- `POST /api/agent/:instanceId/heartbeat` — device presence and tool catalog (device bearer).
+- `POST /api/agent/:instanceId/poll` — claim queued commands (device bearer).
+- `POST /api/agent/:instanceId/result` — return command result (device bearer).
+- `POST /api/agent/:instanceId/mcp-token/rotate` — rotate MCP token (device bearer; invalidates previous token).
+- `POST /api/agent/:instanceId/mcp-token/revoke` — revoke MCP token (device bearer).
+- `GET|POST /api/mcp/:instanceId` — MCP Streamable HTTP JSON-RPC endpoint (MCP bearer). GET returns 405 (no SSE stream). POST supports `initialize`, `notifications/*`, `ping`, `tools/list`, `tools/call`.
 
-## Database setup
-Set `TURSO_DATABASE_URL` and `TURSO_AUTH_TOKEN` in Vercel using the values from your Turso database. The app creates the required tables automatically on first use.
+## Environment variables (Vercel)
+- `TURSO_DATABASE_URL` (required)
+- `TURSO_AUTH_TOKEN` (required)
+- `VORTEX_ADMIN_SECRET` (required for admin endpoints; keep secret, never in desktop app/Git)
+- Optional: `VORTEX_DEVICE_STALE_SECONDS`, `VORTEX_MCP_WAIT_MS`, `VORTEX_COMMAND_TTL_MS`, `VORTEX_STALE_RUNNING_MS`
 
-Set `VORTEX_ADMIN_SECRET` as a sensitive Vercel environment variable. Never commit it.
+## Secure provisioning flow (recommended)
+1. Deploy to Vercel and configure Turso env vars. Verify `GET /api/health` and `GET /api/ready`.
+2. **Admin** creates an enrollment token (server-side, using admin secret):
+   ```bash
+   curl -X POST "https://YOUR_HOST/api/admin/enrollments" \
+     -H "Authorization: Bearer $VORTEX_ADMIN_SECRET" \
+     -H "Content-Type: application/json" \
+     -d '{"name":"My PC","ttl_seconds":86400}'
+   ```
+3. In VortexEditPro, open **ChatGPT Cloud Connection** and enter the server base URL + enrollment token to register. The app receives and stores `instance_id`, `device_token`, and `mcp_token` locally (tokens shown once by server).
+4. Copy the per-instance **MCP URL** and configure ChatGPT Custom Connector with that HTTPS URL and MCP bearer token.
+5. Keep VortexEditPro running and connected; tool execution happens locally on the user's machine.
 
-## Provisioning
-1. Deploy and verify `GET /` and `GET /api/health` report the API is running. Then verify `GET /api/ready` reports `database: connected` before provisioning instances.
-2. Create a desktop instance with an administrator bearer token:
-```bash
-curl -X POST "https://YOUR_HOST/api/admin/instances" \
-  -H "Authorization: Bearer YOUR_ADMIN_SECRET" \
-  -H "Content-Type: application/json" \
-  -d '{"name":"VortexEditPro on my PC"}'
-```
-3. Save the returned `device_token`, `mcp_token`, `instance_id`, and `mcp_url` securely. Tokens are displayed once.
-4. Configure the desktop app with the HTTPS base URL, instance ID, and device token. Add the per-instance MCP URL to ChatGPT with the MCP token as a bearer credential.
+## MCP notes
+- `tools/list` exposes only tools advertised by the connected desktop instance.
+- `tools/call` queues a command for the desktop agent. The server waits briefly for completion; if the command takes longer, it returns a pending response containing `command_id` (command remains active for the agent to complete). Long-running operations should be implemented as async tools that return job/status IDs (e.g. export/import jobs) and polled via status tools.
+- Command results are stored in Turso; stale running commands may be re-queued for delivery (agents should be idempotent where possible).
 
 ## Security
-- Never commit admin, device, or MCP tokens.
-- Only tools advertised by the connected desktop are callable.
-- Device and MCP tokens are stored as SHA-256 hashes.
-- Turso credentials remain server-side in Vercel environment variables; never expose the auth token to desktop clients.
-- Request payloads and command results are size-limited.
-- All editing operations remain local to the user's desktop.
+- TLS/HTTPS for external access (Vercel).
+- Separate per-instance device and MCP credentials; secrets stored as SHA-256 hashes server-side.
+- Admin secret never embedded in desktop apps; use enrollment tokens for user/device registration.
+- Request/rate/size limits and input validation; tool allowlist based on advertised desktop tools.
+- No media files or Turso credentials sent to desktop clients.
 
-## Current limitations
-This is the cloud relay foundation. The matching VortexEditPro desktop agent still needs to be implemented and integrated with the existing command/tool registry. Long-running exports should use a job-start/status pattern rather than hold an MCP request open.
+## Deployment (vortex-cloud-mcp project)
+- Push to the `vortex-cloud-mcp` repository and deploy to the corresponding Vercel project.
+- Do not modify unrelated Vercel projects or existing Turso secrets/data.
