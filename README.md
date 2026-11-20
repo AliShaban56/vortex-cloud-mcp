@@ -21,7 +21,13 @@ Central HTTPS relay for VortexEditPro desktop instances. ChatGPT connects to a p
 - `POST /api/agent/:instanceId/result` — return command result (device bearer).
 - `POST /api/agent/:instanceId/mcp-token/rotate` — rotate MCP token (device bearer; invalidates previous token).
 - `POST /api/agent/:instanceId/mcp-token/revoke` — revoke MCP token (device bearer).
-- `GET|POST /api/mcp/:instanceId` — MCP Streamable HTTP JSON-RPC endpoint (MCP bearer). GET returns 405 (no SSE stream). POST supports `initialize`, `notifications/*`, `ping`, `tools/list`, `tools/call`.
+- `GET|POST /api/mcp/:instanceId` — MCP Streamable HTTP JSON-RPC endpoint (MCP bearer or OAuth bearer bound to this instance/resource). GET returns 405 (no SSE stream). POST supports `initialize`, `notifications/*`, `ping`, `tools/list`, `tools/call`.
+- `GET|POST /api/oauth/register` — OAuth dynamic client registration (public clients).
+- `GET|POST /api/oauth/authorize` — OAuth Authorization Code + PKCE (S256) start; creates a pending, device-approved consent request (no MCP token entry in browser).
+- `GET /api/oauth/authorize/request/:requestId/status` / `POST /api/oauth/authorize/request/:requestId/complete` — pending consent status/completion.
+- `POST /api/oauth/token` — token exchange/refresh (refresh rotation, resource-bound).
+- `GET /api/agent/:instanceId/oauth/requests` — list pending OAuth consent requests for this instance (device bearer).
+- `POST /api/agent/:instanceId/oauth/requests/:requestId` — approve/deny pending OAuth consent request (`{ "decision": "approve"|"deny" }`, device bearer).
 
 ## Environment variables (Vercel)
 - `TURSO_DATABASE_URL` (required)
@@ -29,7 +35,7 @@ Central HTTPS relay for VortexEditPro desktop instances. ChatGPT connects to a p
 - `VORTEX_ADMIN_SECRET` (required for admin endpoints; keep secret, never in desktop app/Git)
 - Optional: `VORTEX_DEVICE_STALE_SECONDS`, `VORTEX_MCP_WAIT_MS`, `VORTEX_COMMAND_TTL_MS`, `VORTEX_STALE_RUNNING_MS`
 
-## Secure provisioning flow (recommended)
+## Secure provisioning and ChatGPT OAuth flow (recommended)
 1. Deploy to Vercel and configure Turso env vars. Verify `GET /api/health` and `GET /api/ready`.
 2. **Admin** creates an enrollment token (server-side, using admin secret):
    ```bash
@@ -38,9 +44,10 @@ Central HTTPS relay for VortexEditPro desktop instances. ChatGPT connects to a p
      -H "Content-Type: application/json" \
      -d '{"name":"My PC","ttl_seconds":86400}'
    ```
-3. In VortexEditPro, open **ChatGPT Cloud Connection** and enter the server base URL + enrollment token to register. The app receives and stores `instance_id`, `device_token`, and `mcp_token` locally (tokens shown once by server).
-4. Copy the per-instance **MCP URL** and configure ChatGPT Custom Connector with that HTTPS URL and MCP bearer token.
-5. Keep VortexEditPro running and connected; tool execution happens locally on the user's machine.
+3. In VortexEditPro, open **ChatGPT Integration / Cloud connection** and register the instance using the server base URL + enrollment token. The app stores credentials locally (sensitive tokens in OS-protected secure storage, not in plain settings files).
+4. In ChatGPT, add a custom MCP connector using the per-instance **MCP URL** and select **OAuth**. The server publishes MCP Protected Resource Metadata and OAuth Authorization Server Metadata, supports Dynamic Client Registration, Authorization Code + PKCE (S256), short-lived access tokens, and rotating refresh tokens.
+5. When ChatGPT starts authorization, the browser shows a pending consent request. **No MCP token or OAuth token is entered in the browser or sent to ChatGPT.** VortexEditPro (authenticated with its device credentials) lists and approves/denies the pending request for that instance; once approved, the browser flow completes and issues an authorization code to the registered client redirect URI.
+6. Keep VortexEditPro running and connected; tool execution happens locally on the user's machine via the existing heartbeat/poll/result relay. OAuth bearer tokens are instance/resource-bound and are revoked when the instance MCP token is rotated/revoked.
 
 ## MCP notes
 - `tools/list` exposes only tools advertised by the connected desktop instance.
@@ -57,3 +64,14 @@ Central HTTPS relay for VortexEditPro desktop instances. ChatGPT connects to a p
 ## Deployment (vortex-cloud-mcp project)
 - Push to the `vortex-cloud-mcp` repository and deploy to the corresponding Vercel project.
 - Do not modify unrelated Vercel projects or existing Turso secrets/data.
+
+
+## OAuth support
+- `GET /api/oauth/protected-resource?resource=<encoded MCP URL>` — per-instance RFC 9728 resource metadata, advertised in the MCP 401 `WWW-Authenticate` challenge.
+- `GET /.well-known/oauth-authorization-server` — RFC 8414 authorization server metadata.
+- `POST /api/oauth/register` — dynamic client registration (public clients).
+- `GET /api/oauth/authorize` — Authorization Code + PKCE (S256) request creates a **pending, device-approved** consent transaction (short-lived, single-use, instance/client/resource-bound). The browser does **not** collect or transmit the instance MCP token.
+- `GET /api/agent/:instanceId/oauth/requests` and `POST /api/agent/:instanceId/oauth/requests/:requestId` — device-authenticated ownership proof and approve/deny of pending requests.
+- `GET /api/oauth/authorize/request/:requestId/status` and `POST /api/oauth/authorize/request/:requestId/complete` — browser polling/completion after in-app approval; issues code only for approved, unexpired, unconsumed requests.
+- `POST /api/oauth/token` — Authorization Code + PKCE S256 and rotating refresh-token exchange; refresh requires matching client/resource binding.
+- OAuth access tokens are audience-bound to one instance MCP URL and one registered client. Rotating or revoking the instance MCP token revokes all OAuth grants for that instance.
