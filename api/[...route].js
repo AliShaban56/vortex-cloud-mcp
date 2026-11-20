@@ -40,12 +40,16 @@ async function authenticateInstance(req, instanceId, tokenColumn) {
   const row = await queryOne(
     `SELECT instance_id, display_name, device_token_hash, mcp_token_hash,
             status, app_version, tools_json, last_seen
-       FROM public.instances WHERE instance_id = $1`,
+       FROM instances WHERE instance_id = $1`,
     [instanceId]
   );
   if (!row) return null;
   const expected = tokenColumn === "device" ? row.device_token_hash : row.mcp_token_hash;
   return safeEqual(hashSecret(token), expected) ? row : null;
+}
+function parseJson(value, fallback) {
+  if (typeof value !== "string") return value ?? fallback;
+  try { return JSON.parse(value); } catch { return fallback; }
 }
 function normalizeTools(tools) {
   if (!Array.isArray(tools)) return [];
@@ -109,7 +113,7 @@ function safeDatabaseDiagnostic(error) {
 }
 
 async function databaseStatus() {
-  if (!process.env.DATABASE_URL) {
+  if (!process.env.TURSO_DATABASE_URL) {
     return {
       database: "not_configured",
       diagnostic: { stage: "configuration", category: "DATABASE_URL_MISSING" }
@@ -165,9 +169,9 @@ async function registerInstance(req, res) {
   const mcpToken = newSecret("vxm_");
   const now = Date.now();
   await execute(
-    `INSERT INTO public.instances
+    `INSERT INTO instances
       (instance_id, display_name, device_token_hash, mcp_token_hash, status, tools_json, created_at)
-     VALUES ($1, $2, $3, $4, 'offline', '[]'::jsonb, $5)`,
+     VALUES ($1, $2, $3, $4, 'offline', '[]', $5)`,
     [instanceId, displayName || "VortexEditPro", hashSecret(deviceToken), hashSecret(mcpToken), now]
   );
   return send(res, 201, {
@@ -185,7 +189,7 @@ async function heartbeat(req, res, instanceId) {
   const body = readBody(req);
   const tools = normalizeTools(body.tools);
   await execute(
-    "UPDATE public.instances SET status='online', last_seen=$1, app_version=$2, tools_json=$3::jsonb WHERE instance_id=$4",
+    "UPDATE instances SET status='online', last_seen=$1, app_version=$2, tools_json=$3 WHERE instance_id=$4",
     [Date.now(), String(body.app_version || "").slice(0, 40), JSON.stringify(tools), instanceId]
   );
   return send(res, 200, { ok: true, server_time: Date.now(), accepted_tools: tools.length });
@@ -197,22 +201,21 @@ async function pollCommands(req, res, instanceId) {
   if (!(await checkRateLimit(`poll:${instanceId}`, 180))) return fail(res, 429, "RATE_LIMITED", "Too many polling requests.");
   const now = Date.now();
   const result = await execute(
-    `WITH picked AS (
-       SELECT command_id FROM public.commands
-        WHERE instance_id=$1 AND status='queued' AND expires_at>$2
-        ORDER BY created_at LIMIT 5 FOR UPDATE SKIP LOCKED
-     )
-     UPDATE public.commands c SET status='running', updated_at=$2
-      FROM picked WHERE c.command_id=picked.command_id
-      RETURNING c.command_id, c.tool_name, c.arguments_json, c.created_at`,
-    [instanceId, now]
-  );
+    `UPDATE commands SET status='running', updated_at=$1
+      WHERE command_id IN (
+        SELECT command_id FROM commands
+         WHERE instance_id=$2 AND status='queued' AND expires_at>$1
+         ORDER BY created_at LIMIT 5
+      ) AND status='queued'
+      RETURNING command_id, tool_name, arguments_json, created_at`,
+    [now, instanceId]
+  )
   const commands = result.rows.map((row) => ({
     command_id: row.command_id, tool_name: row.tool_name,
-    arguments: row.arguments_json ?? {}, created_at: Number(row.created_at)
+    arguments: parseJson(row.arguments_json, {}), created_at: Number(row.created_at)
   }));
   await execute(
-    "UPDATE public.commands SET status='expired', updated_at=$1 WHERE instance_id=$2 AND status='queued' AND expires_at<=$1",
+    "UPDATE commands SET status='expired', updated_at=$1 WHERE instance_id=$2 AND status='queued' AND expires_at<=$1",
     [now, instanceId]
   );
   return send(res, 200, { commands, server_time: now });
@@ -226,7 +229,7 @@ async function postResult(req, res, instanceId) {
   const resultJson = JSON.stringify(body.result ?? null);
   if (resultJson.length > 128 * 1024) return fail(res, 413, "RESULT_TOO_LARGE", "Command result is too large.");
   const result = await execute(
-    `UPDATE public.commands SET status=$1, result_json=$2::jsonb, error_text=$3, updated_at=$4
+    `UPDATE commands SET status=$1, result_json=$2, error_text=$3, updated_at=$4
       WHERE command_id=$5 AND instance_id=$6 AND status='running'`,
     [body.error ? "failed" : "completed", body.error ? null : resultJson,
      body.error ? String(body.error).slice(0, 2_000) : null, Date.now(), body.command_id, instanceId]
@@ -239,25 +242,25 @@ async function queueAndWait(instanceId, toolName, args) {
   const now = Date.now();
   const waitMs = Math.min(Math.max(Number(process.env.VORTEX_MCP_WAIT_MS || 7000), 1000), 7500);
   await execute(
-    `INSERT INTO public.commands
+    `INSERT INTO commands
       (command_id, instance_id, tool_name, arguments_json, status, created_at, updated_at, expires_at)
-     VALUES ($1, $2, $3, $4::jsonb, 'queued', $5, $5, $6)`,
+     VALUES ($1, $2, $3, $4, 'queued', $5, $5, $6)`,
     [commandId, instanceId, toolName, JSON.stringify(args ?? {}), now, now + waitMs + 10_000]
   );
   const deadline = Date.now() + waitMs;
   while (Date.now() < deadline) {
     const row = await queryOne(
-      "SELECT status, result_json, error_text FROM public.commands WHERE command_id=$1 AND instance_id=$2",
+      "SELECT status, result_json, error_text FROM commands WHERE command_id=$1 AND instance_id=$2",
       [commandId, instanceId]
     );
     if (row?.status === "completed") {
-      return { content: [{ type: "text", text: JSON.stringify(row.result_json ?? null) }], isError: false };
+      return { content: [{ type: "text", text: JSON.stringify(parseJson(row.result_json, null)) }], isError: false };
     }
     if (row?.status === "failed") return { content: [{ type: "text", text: row.error_text || "The desktop command failed." }], isError: true };
     await new Promise((resolve) => setTimeout(resolve, 250));
   }
   await execute(
-    "UPDATE public.commands SET status='expired', updated_at=$1 WHERE command_id=$2 AND status IN ('queued','running')",
+    "UPDATE commands SET status='expired', updated_at=$1 WHERE command_id=$2 AND status IN ('queued','running')",
     [Date.now(), commandId]
   );
   return { content: [{ type: "text", text: "The connected VortexEditPro device did not respond in time. Check that the desktop app is running and connected, then retry." }], isError: true };
@@ -292,13 +295,13 @@ async function handleMcp(req, res, instanceId) {
   }
   if (body.method === "ping") return send(res, 200, { jsonrpc: "2.0", id, result: {} }, extra);
   if (body.method === "tools/list") {
-    return send(res, 200, { jsonrpc: "2.0", id, result: { tools: normalizeTools(instance.tools_json || []) } }, extra);
+    return send(res, 200, { jsonrpc: "2.0", id, result: { tools: normalizeTools(parseJson(instance.tools_json, [])) } }, extra);
   }
   if (body.method === "tools/call") {
     const name = body.params?.name;
     const args = body.params?.arguments ?? {};
     if (!isSafeToolName(name)) return send(res, 200, { jsonrpc: "2.0", id, error: { code: -32602, message: "Invalid tool name." } }, extra);
-    const tools = normalizeTools(instance.tools_json || []);
+    const tools = normalizeTools(parseJson(instance.tools_json, []));
     if (!tools.some((tool) => tool.name === name)) return send(res, 200, { jsonrpc: "2.0", id, error: { code: -32602, message: "Tool is not advertised by the connected desktop application." } }, extra);
     const staleAfter = Number(process.env.VORTEX_DEVICE_STALE_SECONDS || 45) * 1000;
     if (!instance.last_seen || Date.now() - Number(instance.last_seen) > staleAfter) {
