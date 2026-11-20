@@ -108,30 +108,51 @@ function safeDatabaseDiagnostic(error) {
   return { category: "UNKNOWN_DATABASE_ERROR", code: knownCodes.has(code) ? code : null };
 }
 
-async function health(res) {
+async function databaseStatus() {
   if (!process.env.DATABASE_URL) {
-    return send(res, 503, {
-      ok: false, service: "Vortex Cloud MCP", database: "not_configured",
+    return {
+      database: "not_configured",
       diagnostic: { stage: "configuration", category: "DATABASE_URL_MISSING" }
-    });
+    };
   }
 
   let stage = "connection";
   try {
-    // Run a lightweight query first, so connectivity errors can be distinguished from schema errors.
     await queryOne("SELECT 1 AS ok");
     stage = "schema";
     await ensureSchema();
-    return send(res, 200, { ok: true, service: "Vortex Cloud MCP", database: "connected" });
+    return { database: "connected" };
   } catch (error) {
-    const diagnostic = safeDatabaseDiagnostic(error);
-    return send(res, 503, {
-      ok: false,
-      service: "Vortex Cloud MCP",
+    return {
       database: "unavailable",
-      diagnostic: { stage, ...diagnostic }
-    });
+      diagnostic: { stage, ...safeDatabaseDiagnostic(error) }
+    };
   }
+}
+
+// Liveness: confirms the Vercel function is running, regardless of database state.
+async function health(res) {
+  const db = await databaseStatus();
+  return send(res, 200, {
+    ok: true,
+    service: "Vortex Cloud MCP",
+    status: "running",
+    ...db,
+    checks: { api: "ok", database: db.database }
+  });
+}
+
+// Readiness: used by deploy monitors that require both API and database availability.
+async function readiness(res) {
+  const db = await databaseStatus();
+  const ready = db.database === "connected";
+  return send(res, ready ? 200 : 503, {
+    ok: ready,
+    service: "Vortex Cloud MCP",
+    status: ready ? "ready" : "degraded",
+    ...db,
+    checks: { api: "ok", database: db.database }
+  });
 }
 async function registerInstance(req, res) {
   if (!process.env.VORTEX_ADMIN_SECRET) return fail(res, 503, "ADMIN_NOT_CONFIGURED", "The server administrator secret is not configured.");
@@ -292,9 +313,21 @@ export default async function handler(req, res) {
   if (req.method === "OPTIONS") return send(res, 204, null);
   const parts = routePath(req);
   try {
+    if (parts.length === 0) {
+      if (req.method !== "GET") return fail(res, 405, "METHOD_NOT_ALLOWED", "Use GET.");
+      return send(res, 200, {
+        service: "Vortex Cloud MCP",
+        status: "running",
+        endpoints: { health: "/api/health", readiness: "/api/ready" }
+      });
+    }
     if (parts.length === 1 && parts[0] === "health") {
       if (req.method !== "GET") return fail(res, 405, "METHOD_NOT_ALLOWED", "Use GET.");
       return await health(res);
+    }
+    if (parts.length === 1 && parts[0] === "ready") {
+      if (req.method !== "GET") return fail(res, 405, "METHOD_NOT_ALLOWED", "Use GET.");
+      return await readiness(res);
     }
     if (parts.length === 2 && parts[0] === "admin" && parts[1] === "instances") {
       if (req.method !== "POST") return fail(res, 405, "METHOD_NOT_ALLOWED", "Use POST.");
