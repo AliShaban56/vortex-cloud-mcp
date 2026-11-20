@@ -39,8 +39,9 @@ Central HTTPS relay for VortexEditPro desktop instances. ChatGPT connects to a p
      -d '{"name":"My PC","ttl_seconds":86400}'
    ```
 3. In VortexEditPro, open **ChatGPT Cloud Connection** and enter the server base URL + enrollment token to register. The app receives and stores `instance_id`, `device_token`, and `mcp_token` locally (tokens shown once by server).
-4. Copy the per-instance **MCP URL** and configure ChatGPT Custom Connector with that HTTPS URL and MCP bearer token.
-5. Keep VortexEditPro running and connected; tool execution happens locally on the user's machine.
+4. Copy the per-instance **MCP URL** into ChatGPT's custom connector and select **OAuth**. The server publishes MCP Protected Resource Metadata and OAuth Authorization Server Metadata, supports Dynamic Client Registration, Authorization Code + PKCE (S256), short-lived access tokens, and rotating refresh tokens.
+5. During the OAuth approval page, enter the existing per-instance MCP access token saved by VortexEditPro. It is exchanged for a client-bound OAuth grant; it is not sent to ChatGPT. If the desktop app does not provide a way to view/copy its saved MCP token, add that UI before enabling OAuth for end users.
+6. Keep VortexEditPro running and connected; tool execution happens locally on the user's machine.
 
 ## MCP notes
 - `tools/list` exposes only tools advertised by the connected desktop instance.
@@ -57,3 +58,13 @@ Central HTTPS relay for VortexEditPro desktop instances. ChatGPT connects to a p
 ## Deployment (vortex-cloud-mcp project)
 - Push to the `vortex-cloud-mcp` repository and deploy to the corresponding Vercel project.
 - Do not modify unrelated Vercel projects or existing Turso secrets/data.
+
+
+## OAuth support
+- `/api/oauth/protected-resource?resource=<encoded MCP URL>` — per-instance RFC 9728 resource metadata, advertised in the MCP 401 `WWW-Authenticate` challenge.
+- `/.well-known/oauth-authorization-server` — RFC 8414 authorization server metadata.
+- `POST /api/oauth/register` — public-client registration (no client secret).
+- `GET|POST /api/oauth/authorize` — user approval using the existing instance MCP token.
+- `POST /api/oauth/token` — Authorization Code + PKCE S256 and rotating refresh-token exchange.
+- OAuth access tokens are audience-bound to one instance MCP URL and one registered client. Rotating or revoking the instance MCP token revokes all OAuth grants for that instance.
+- The authorization page requires the MCP token already stored by the desktop app. Do not paste it into ChatGPT or share it in support chats.
