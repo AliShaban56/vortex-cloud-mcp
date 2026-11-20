@@ -9,7 +9,9 @@ Central HTTPS relay for VortexEditPro desktop instances. ChatGPT connects to a p
 - Per-instance credentials: separate device token and MCP bearer token. Raw tokens are returned only once at registration.
 
 ## Routes
-- `GET /api/health` — service/database readiness.
+- `GET /` — basic service information (no database dependency).
+- `GET /api/health` — liveness; returns HTTP 200 while the API is running and reports database state separately.
+- `GET /api/ready` — readiness; returns HTTP 200 only when PostgreSQL and the required schema are available, otherwise HTTP 503.
 - `POST /api/admin/instances` — create an instance (admin bearer required).
 - `POST /api/agent/:instanceId/heartbeat` — device presence and tool catalog.
 - `POST /api/agent/:instanceId/poll` — claim queued commands.
@@ -22,7 +24,7 @@ Set `DATABASE_URL` in Vercel to the Supabase PostgreSQL connection string (use t
 Set `VORTEX_ADMIN_SECRET` as a sensitive Vercel environment variable. Never commit it.
 
 ## Provisioning
-1. Deploy and verify `GET /api/health` reports `database: connected`.
+1. Deploy and verify `GET /` and `GET /api/health` report the API is running. Then verify `GET /api/ready` reports `database: connected` before provisioning instances.
 2. Create a desktop instance with an administrator bearer token:
 ```bash
 curl -X POST "https://YOUR_HOST/api/admin/instances" \
