@@ -113,10 +113,10 @@ function safeDatabaseDiagnostic(error) {
 }
 
 async function databaseStatus() {
-  if (!process.env.TURSO_DATABASE_URL) {
+  if (!process.env.TURSO_DATABASE_URL || !process.env.TURSO_AUTH_TOKEN) {
     return {
       database: "not_configured",
-      diagnostic: { stage: "configuration", category: "DATABASE_URL_MISSING" }
+      diagnostic: { stage: "configuration", category: !process.env.TURSO_DATABASE_URL ? "TURSO_DATABASE_URL_MISSING" : "TURSO_AUTH_TOKEN_MISSING" }
     };
   }
 
