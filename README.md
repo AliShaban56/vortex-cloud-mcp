@@ -23,7 +23,8 @@ Central HTTPS relay for VortexEditPro desktop instances. ChatGPT connects to a p
 - `POST /api/agent/:instanceId/mcp-token/revoke` — revoke MCP token (device bearer).
 - `GET|POST /api/mcp/:instanceId` — MCP Streamable HTTP JSON-RPC endpoint (MCP bearer or OAuth bearer bound to this instance/resource). GET returns 405 (no SSE stream). POST supports `initialize`, `notifications/*`, `ping`, `tools/list`, `tools/call`.
 - `GET|POST /api/oauth/register` — OAuth dynamic client registration (public clients).
-- `GET|POST /api/oauth/authorize` — OAuth Authorization Code + PKCE (S256) start; creates a pending, device-approved consent request (no MCP token entry in browser).
+- `GET /api/oauth/authorize` — OAuth Authorization Code + PKCE (S256) start; renders a browser consent page with Approve and Deny actions (no MCP token entry in browser).
+- `POST /api/oauth/authorize/request/:requestId/decision` — same-origin browser form decision; approves or denies the short-lived request.
 - `GET /api/oauth/authorize/request/:requestId/status` / `POST /api/oauth/authorize/request/:requestId/complete` — pending consent status/completion.
 - `POST /api/oauth/token` — token exchange/refresh (refresh rotation, resource-bound).
 - `GET /api/agent/:instanceId/oauth/requests` — list pending OAuth consent requests for this instance (device bearer).
@@ -46,7 +47,7 @@ Central HTTPS relay for VortexEditPro desktop instances. ChatGPT connects to a p
    ```
 3. In VortexEditPro, open **ChatGPT Integration / Cloud connection** and register the instance using the server base URL + enrollment token. The app stores credentials locally (sensitive tokens in OS-protected secure storage, not in plain settings files).
 4. In ChatGPT, add a custom MCP connector using the per-instance **MCP URL** and select **OAuth**. The server publishes MCP Protected Resource Metadata and OAuth Authorization Server Metadata, supports Dynamic Client Registration, Authorization Code + PKCE (S256), short-lived access tokens, and rotating refresh tokens.
-5. When ChatGPT starts authorization, the browser shows a pending consent request. **No MCP token or OAuth token is entered in the browser or sent to ChatGPT.** VortexEditPro (authenticated with its device credentials) lists and approves/denies the pending request for that instance; once approved, the browser flow completes and issues an authorization code to the registered client redirect URI.
+5. When ChatGPT starts authorization, the browser shows a consent page identifying the ChatGPT client, VortexEditPro instance, callback destination, and requested scope. The user approves or denies directly in that browser page; the desktop app does not need to display or process the consent dialog. **No MCP token or OAuth token is entered in the browser.** Approval completes the authorization-code flow and redirects to the registered ChatGPT callback.
 6. Keep VortexEditPro running and connected; tool execution happens locally on the user's machine via the existing heartbeat/poll/result relay. OAuth bearer tokens are instance/resource-bound and are revoked when the instance MCP token is rotated/revoked.
 
 ## MCP notes
@@ -70,8 +71,9 @@ Central HTTPS relay for VortexEditPro desktop instances. ChatGPT connects to a p
 - `GET /api/oauth/protected-resource?resource=<encoded MCP URL>` — per-instance RFC 9728 resource metadata, advertised in the MCP 401 `WWW-Authenticate` challenge.
 - `GET /.well-known/oauth-authorization-server` — RFC 8414 authorization server metadata.
 - `POST /api/oauth/register` — dynamic client registration (public clients).
-- `GET /api/oauth/authorize` — Authorization Code + PKCE (S256) request creates a **pending, device-approved** consent transaction (short-lived, single-use, instance/client/resource-bound). The browser does **not** collect or transmit the instance MCP token.
+- `GET /api/oauth/authorize` — Authorization Code + PKCE (S256) request creates a short-lived, single-use, instance/client/resource-bound consent transaction and renders browser-native Approve/Deny controls. The browser does **not** collect or transmit the instance MCP token.
+- `POST /api/oauth/authorize/request/:requestId/decision` — accepts only same-origin browser form submissions and records the user's approval or denial.
 - `GET /api/agent/:instanceId/oauth/requests` and `POST /api/agent/:instanceId/oauth/requests/:requestId` — device-authenticated ownership proof and approve/deny of pending requests.
-- `GET /api/oauth/authorize/request/:requestId/status` and `POST /api/oauth/authorize/request/:requestId/complete` — browser polling/completion after in-app approval; issues code only for approved, unexpired, unconsumed requests.
+- `GET /api/oauth/authorize/request/:requestId/status` and `POST /api/oauth/authorize/request/:requestId/complete` — browser polling/completion after browser approval; issues code only for approved, unexpired, unconsumed requests.
 - `POST /api/oauth/token` — Authorization Code + PKCE S256 and rotating refresh-token exchange; refresh requires matching client/resource binding.
 - OAuth access tokens are audience-bound to one instance MCP URL and one registered client. Rotating or revoking the instance MCP token revokes all OAuth grants for that instance.
