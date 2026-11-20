@@ -1,9 +1,14 @@
 {
   "rewrites": [
-    { "source": "/", "destination": "/api/health" }
+    { "source": "/", "destination": "/api/health" },
+    { "source": "/.well-known/oauth-authorization-server", "destination": "/api/oauth/authorization-server" },
+    { "source": "/.well-known/oauth-protected-resource/:path*", "destination": "/api/oauth/protected-resource/:path*" }
   ],
   "functions": {
     "api/[...route].js": {
+      "maxDuration": 10
+    },
+    "api/oauth/[...route].js": {
       "maxDuration": 10
     }
   }
